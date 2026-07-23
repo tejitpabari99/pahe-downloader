@@ -36,29 +36,41 @@ This folder documents investigation only; no implementation code exists yet. See
   can be cheaply replicated via plain HTTP after that (e.g. by reusing a Cloudflare
   clearance cookie) is unknown and needs a follow-up session with browser tooling available.
 
-## Open questions for the user before implementation starts
+## Open questions — resolved by user (2026-07-23)
 
-1. **Environment**: is it acceptable to install/use a headless browser (Playwright +
-   Chromium) for this project? Any preference on Playwright vs. an alternative?
-2. **Cloudflare risk tolerance**: if the Cloudflare challenge sometimes escalates to an
-   interactive Turnstile/CAPTCHA (common for datacenter IPs or flagged fingerprints), are
-   you open to a paid CAPTCHA-solving service, or should the tool simply fail loudly and let
-   you solve it manually in a real browser when that happens?
-3. **MEGA account**: do you have a MEGA account/API credentials? Not needed to get the link,
-   but relevant if a later phase should also download or verify the MEGA file
-   programmatically (MEGA has its own API/`mega.py` etc. — out of scope for what's been
-   researched so far).
-4. **Stability of the redirect chain**: does it change per link/session, or is it stable
-   long enough to hardcode hop logic? Unknown — needs to be checked once browser tooling is
-   available, ideally across several different `ht` tokens/providers/pages.
-5. **"Per Episode" MEGA link on batch pages**: is it in practice a single MEGA folder with
-   all episodes, or something else? Confirming this affects how the CLI should present that
-   choice to the user (see `docs/planning/cli-ux-notes.md`).
-6. **Provider abbreviation coverage**: `SD` (seen on the Parish example) is unidentified.
-   Worth confirming there isn't a similarly-labeled host that should be excluded/could be
-   confused with MEGA in edge cases (current filter regex `^MG(?:\s*\d+)?$` seems safe, but
-   worth double-checking against a wider sample of pages).
-7. **Rate limiting / ToS**: no `Crawl-delay` or page-level disallow was found in
-   `robots.txt`, but no attempt was made to hammer the site — recommend the eventual tool
-   be conservative (single request per invocation, normal browser UA, no concurrency) both
-   out of courtesy and to avoid tripping Cloudflare on the pahe.ink side too.
+1. **Environment**: **resolved.** A headless browser (Playwright + Chromium) is acceptable
+   for clearing the Cloudflare hop. No alternative was requested.
+2. **Cloudflare risk tolerance**: still open — not addressed by the user yet. If the
+   challenge escalates to an interactive Turnstile/CAPTCHA, whether to use a paid
+   solving service vs. failing loudly for manual resolution remains an open call to make
+   once real browser tracing surfaces whether this actually happens.
+3. **MEGA account**: **resolved.** The user has an existing MEGA.nz account. It is **not**
+   needed to resolve/view the final mega.nz link — that works anonymously — but it's
+   available in case a later phase needs authenticated MEGA access (e.g. the MEGA API/
+   `mega.py`), which remains out of scope for now.
+4. **Stability of the redirect chain**: **resolved (belief, not yet proven).** The user
+   believes the teknoasian.com redirect chain is *likely stable* across different tokens/
+   links, but isn't fully certain. This still requires empirical verification — the
+   recommended check is tracing 2-3 different pahe.ink download links (different pages/
+   providers/tokens) once browser tooling is available and confirming the hop structure/
+   mechanism is identical and only the `ht` token differs.
+5. **"Per Episode" MEGA link on batch pages**: **resolved.** On batch/season pages,
+   "Per Episode" MEGA entries are individual per-episode file links, while the season-wide
+   "Batch" MEGA entry is a MEGA **folder** link containing all episodes. Both are valid
+   resolution targets — the tool should resolve whichever entry the user picks and return
+   whatever final `mega.nz` URL results (file or folder), without trying to distinguish or
+   validate which kind it got.
+6. **Provider abbreviation coverage**: **resolved.** The unidentified `SD` provider is
+   out of scope and can be ignored/skipped entirely — no further identification needed.
+7. **Rate limiting / ToS**: still open/unaddressed by the user — recommendation stands as
+   written: the eventual tool should be conservative (single request per invocation,
+   normal browser UA, no concurrency) both out of courtesy and to avoid tripping Cloudflare
+   on the pahe.ink side too.
+8. **Provider scope confirmation**: **resolved.** Build and validate the MEGA path
+   end-to-end first. Other providers (GD, PD, VF, 1F) are deferred, presumed to follow the
+   same teknoasian.com gate pattern, and will be tackled only after MEGA works.
+9. **Product constraint — no media downloads (new, from user)**: **resolved.** The tool's
+   job ends at producing the final `mega.nz` URL as text output. It must **never** download
+   the actual media file content and should avoid triggering/consuming a MEGA download
+   quota. Resolving the link and/or a `HEAD`-style validity check is fine; a `GET` of the
+   actual file bytes is not. This applies to every phase of the project, not just MEGA.
