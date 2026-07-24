@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pahe-dl"
+version = "0.1.0"
+description = "Auto Pahe Media Downloader (MEGA resolver CLI) - resolves pahe.ink MEGA gate links to final mega.nz URLs"
+requires-python = ">=3.9"
+dependencies = [
+    "requests>=2.32,<3",
+    "beautifulsoup4>=4.12,<5",
+    "questionary>=2.0,<3",
+    "playwright==1.61.0",
+]
+
+[project.scripts]
+pahe-dl = "pahe_dl.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pahe_dl*"]
