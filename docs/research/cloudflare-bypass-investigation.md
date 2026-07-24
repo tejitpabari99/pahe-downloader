@@ -392,6 +392,152 @@ unremarkable to someone not looking for Cloudflare-specific markers) or a pre-fi
 this addendum's `LLIsBlocked`-branch finding stands regardless of which one actually happened, since
 it's a genuine gap either way.
 
+## Addendum: `LLIsBlocked` was a red herring - the real script, and the real wall, recovered live (2026-07-24)
+
+Follow-up to the two addenda above, triggered by a third live report ("I clicked the link you
+gave, I have to do the clicking thing again... no point of developing this at all") and a
+direct instruction to stop treating `--manual` as an acceptable answer and instead find out
+exactly how `LLIsBlocked` gets set to true and neutralize it.
+
+This session did what neither prior addendum did: loaded real, current `?ht=...` gate URLs
+with headless Playwright from this VM and read the actual `<script>` contents, rather than
+reasoning from the partial fragment quoted in the earlier addenda. Both a fresh `pahe.ink`
+page fetch (via `parser.py`, plain HTTP - unaffected by anything below) and the `teknoasian.com`
+gate loads worked cleanly from this VM this session: Cloudflare's front door passed silently
+(`GET /?ht=...` → `200`, full page + script returned), exactly as `playwright-feasibility.md`
+originally found.
+
+### What `LLIsBlocked` actually is, verbatim, as of 2026-07-24
+
+Recovered identically across two independent, freshly-parsed `ht` tokens (different releases/
+resolutions, same underlying template):
+
+```js
+var LLPayload = '...(base64-looking blob)...'
+var LLIsBlocked = false;
+var LLBlockTime = 4
+...
+var ADS_URL = 'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js';
+
+function checkAdsBlocked(callback) {
+    var xhr = new XMLHttpRequest();
+    xhr.onreadystatechange = function () {
+        if (xhr.readyState == XMLHttpRequest.DONE) {
+            callback(xhr.status === 0 || xhr.responseURL !== ADS_URL);
+        }
+    };
+    xhr.open('HEAD', ADS_URL, true);
+    xhr.send(null);
+}
+if(false) {
+    checkAdsBlocked(function(adsBlocked) {
+        LLIsBlocked = adsBlocked;
+    });
+}
+```
+
+So the detection mechanism, as hypothesized in the previous addendum, genuinely is a classic
+bait-request technique - `HEAD` a well-known ad-serving URL (`adsbygoogle.js`) and treat a
+failed/redirected response as "blocked". **But the call site that would ever invoke it is
+wrapped in `if(false) { ... }`** - dead, unreachable code. `LLIsBlocked` is declared `false`
+and nothing on the page ever reassigns it before the `.postnext` click handler reads it. The
+only two other assignments in the whole script are `LLIsBlocked = false;` inside the
+`.postnext` click handler's own `if (LLIsBlocked)` branch (a self-resetting guard for a branch
+that can now never be entered). **Conclusion: `LLIsBlocked` cannot evaluate `true` today, from
+any network, any ad blocker, any VPN - the site has shipped this check disabled.** This holds
+for both tokens tested and is presumably a global template setting (`if(false)` is static
+source, not conditioned on anything request-specific), not a per-token or per-IP variation.
+
+This also resolves an inconsistency the previous addendum couldn't: the `.postnext` click
+handler in the live script is:
+
+```js
+document.querySelector('.postnext').addEventListener('click', () => {
+    if (LLIsBlocked) {
+        LLIsBlocked = false;
+        /* show "Ad blocker detected" message, wait LLBlockTime seconds, re-show button */
+    } else {
+        if (submitRedirect) {
+            window.open(submitRedirect, "_blank")
+        }
+        xxc.submit();
+    }
+});
+```
+
+`xxc.submit()` is **not** gated on `window.open()`'s return value at all - unlike the
+`if (!w) location.href = adUrl`-shaped pattern the first addendum (and `WINDOW_OPEN_SHIM_JS`)
+assumed. `window.open(submitRedirect, "_blank")` is called and its result is simply discarded;
+`xxc.submit()` runs unconditionally right after. `WINDOW_OPEN_SHIM_JS` is harmless to keep (it
+costs nothing and may matter for a template variant that does use that pattern - teknoasian's
+gate script has changed at least twice before per `prior-art-and-alternatives.md`), but it is
+not doing anything load-bearing against the *current* script, and no init-script countermeasure
+against `LLIsBlocked` was written, because there is nothing live to counter - writing one would
+be pure dead-code theater against a check the site itself already disabled.
+
+### So what actually stops the automated chain? Reproduced live, 4/4, regardless of technique
+
+With `LLIsBlocked` ruled out, the click-chain was driven for real against three different fresh
+tokens, two different ways:
+
+1. **Full click-chain** (`.humanVerify` → wait/skip → `.postnext`), including a variant with
+   deliberate human-like mouse movement to each button (`page.mouse.move(..., steps=10-12)`,
+   randomized 0.3-1.0s pauses before each click, matching or exceeding the site's own ~9s
+   countdown dwell time) - **2/2 tokens**: the `.postnext` click's resulting page (same-origin
+   POST, no `action` attribute so it targets the current URL) came back as Cloudflare's
+   `Just a moment...` interstitial - HTML title `Just a moment...`, a
+   `challenges.cloudflare.com` CSP `frame-src`/`connect-src` entry, no `#xxc`, no
+   `.humanVerify`, no `mega.nz` anywhere in the response. Identical outcome with and without
+   the human-like mouse movement/timing.
+2. **Same-session `fetch()` calls** issued via `page.evaluate()` from the already-loaded,
+   already-Cloudflare-cleared gate page (same cookies, same origin, no DOM interaction at all)
+   - **1/1 POST** (replicating the `#xxc` form's own `hw=<LLPayload>` body) and **1/1 plain
+   GET** (no body, just re-requesting the exact same URL that had just loaded fine) - both
+   came back `403`, HTML title `Just a moment...`, same `challenges.cloudflare.com` CSP.
+
+**4 for 4.** Every single follow-up request to `teknoasian.com` in a session - POST or GET,
+via a real click-driven navigation or via `fetch()`, with or without human-like interaction
+timing - got the same Cloudflare Managed Challenge the *first* request in the session never
+did. This rules out click-trustedness, request method, DOM-vs-fetch, and interaction timing as
+the variable; the only thing that changed between "request 1: passes" and "request 2+: hard
+403 challenge" is that it's a second request in the same session, from the same IP. That is a
+textbook signature of IP-reputation-driven Cloudflare Bot Management stepping up enforcement
+mid-session, not a per-request JS-level check.
+
+This is, concretely, the exact same wall this document's own headline section already
+catalogued as **empirically tested and unsolved from this VM's IP** (patchright, nodriver, and
+camoufox all included) - "Cloudflare Terminal-Challenge Bypass Investigation (Part 5)" at the
+top of this file. The `LLIsBlocked` theory in the two addenda above was a plausible-sounding
+but, per this session's live evidence, incorrect explanation for the same underlying symptom;
+the real cause was the already-documented terminal Managed Challenge the whole time.
+
+### What this means for the tool, concretely
+
+- **No JS countermeasure was added for `LLIsBlocked`**, because there is nothing live to
+  counter. `resolver.py`'s `AdNetworkDeadEndError` docstring and this repo's `README.md` have
+  been updated to state this as a confirmed finding, not a hedge, so a future session doesn't
+  re-chase this same lead.
+- `resolver.py`'s existing classification logic (`_is_cloudflare_challenge()`,
+  `blocked_early`/`is_cf` in `resolve_gate_url()`) already correctly identifies this exact
+  failure mode as a genuine Cloudflare challenge, not an ad-network dead end - confirmed
+  directly this session (the "Just a moment..." title and `challenges.cloudflare.com` iframe
+  checks matched every reproduction above). No bug was found in that classification.
+- The headed-browser fallback could not be exercised end-to-end in this VM (`no X server or
+  $DISPLAY` - this VM has no display at all, a separate and expected limitation of the sandbox,
+  not of the code), so the *"human clears the visible challenge, tool auto-captures the mega.nz
+  link"* half of the flow was verified only by code inspection this session, not by an actual
+  human clearing a real challenge window.
+- **This is genuinely not fixable from this VM by changing `resolver.py`.** Per the "IP
+  reputation" section at the top of this document, this VM's outbound IP is a Hetzner
+  dedicated-server address, a class of IP Cloudflare treats with materially more suspicion than
+  a residential connection. The recommendation stands and is now further corroborated with
+  fresh, tightly-controlled evidence gathered specifically for this session: **re-test from the
+  user's actual machine/network (e.g. their Windows desktop) before concluding the automation
+  itself is broken.** If a residential run still hits the same wall, that would be the trigger
+  to revisit the paid CAPTCHA-solving option this document already priced out, or to explore
+  session/IP-persistence strategies not yet tried - not to add more JS shims, since the
+  evidence here shows the obstacle is not JS-level at all.
+
 ## Session artifacts
 
 Three throwaway virtual environments (`.venv-cf-test` with patchright, `.venv-nodriver`,

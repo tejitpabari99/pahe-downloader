@@ -113,19 +113,23 @@ the same token tends to make Cloudflare's response worse, not better. If you wan
 again, re-run the tool (this may or may not get a fresh token, since pahe.ink pages are
 cached) or pick a different resolution/entry.
 
-**Not every dead end is a Cloudflare challenge.** teknoasian.com's ad-monetization step
-occasionally diverts the browser tab to unrelated ad content (e.g. a random blog article on
-the same domain) instead of either the download link or a real Cloudflare challenge - see
+**Not every dead end is a Cloudflare challenge.** teknoasian.com's ad-monetization step can, in
+principle, divert the browser tab to unrelated ad content (e.g. a random blog article on the
+same domain) instead of either the download link or a real Cloudflare challenge - see
 `docs/research/cloudflare-bypass-investigation.md`. There's nothing to click through on a
 page like that, so the tool detects this case specifically and fails fast with a clear
 "ad-network dead end" error instead of opening a pointless visible browser window and telling
 you it's a Cloudflare challenge. If you see that error, just re-run the tool - it's normally
-transient - or try `--manual` instead. Note it can also be triggered by a network/DNS-level ad
-blocker (Pi-hole, AdGuard Home, a VPN's built-in blocker, etc. - not a browser extension; the
-automated browser this tool launches is a fresh, extension-free session, so a browser-extension
-adblocker on your everyday browser is not the cause) blocking requests the gate script's own
-ad-blocker-detection logic checks for. If you suspect that, `--manual` sidesteps the whole
-automated chain and lets you clear the gate in your own browser instead.
+transient - or try `--manual` instead.
+
+(Earlier notes here speculated a network/DNS-level ad blocker could be the cause, via the
+gate script's own `LLIsBlocked` ad-blocker-detection flag. A live re-check of the actual gate
+script on 2026-07-24 found that detection code is currently disabled by the site itself - `if
+(false) { checkAdsBlocked(...) }` - so `LLIsBlocked` never becomes `true` today, from any
+network. It isn't the live cause of dead ends or of the terminal Cloudflare wall described
+above; that wall is the real, still-unsolved obstacle - see the "LLIsBlocked was a red
+herring" addendum in `docs/research/cloudflare-bypass-investigation.md` for the full
+evidence.)
 
 ## Project layout
 

@@ -117,6 +117,31 @@ class AdNetworkDeadEndError(GateResolutionError):
     headed browser window for it would just be a silent dead end - as
     observed in a live bug report).
 
+    UPDATE 2026-07-24 (live re-check, see the "LLIsBlocked was a red herring"
+    addendum in docs/research/cloudflare-bypass-investigation.md for full
+    evidence): the `LLIsBlocked`/ad-blocker-detection theory below is
+    superseded. The actual live gate script, recovered by loading real
+    `?ht=...` URLs, hardcodes `var LLIsBlocked = false;` and wraps the only
+    code that could ever change it in dead code - `if (false) {
+    checkAdsBlocked(...) }` - so `LLIsBlocked` never becomes true today, from
+    any network, and `xxc.submit()` fires unconditionally on `.postnext`
+    (there is also no `if (!w) location.href = adUrl`-shaped fallback in the
+    current script at all - `window.open(submitRedirect, "_blank")` is called
+    and its return value is never inspected). The real, still-unsolved
+    obstacle reproduced live on that date - on every one of 4 independent
+    attempts, across 3 different tokens, via full click-chain, via a
+    same-session `fetch()` POST, and via a plain same-session `fetch()` GET -
+    was a genuine Cloudflare Managed Challenge (`Just a moment...` title, 403,
+    `challenges.cloudflare.com` CSP) on the *second* request to
+    teknoasian.com in a session, regardless of request method or human-like
+    click timing/mouse movement. This is IP-reputation-based bot management,
+    not a JS check this module can neutralize - it's the same wall already
+    catalogued as unsolved-from-this-VM in the "Cloudflare Terminal-Challenge
+    Bypass Investigation (Part 5)" section of
+    docs/research/cloudflare-bypass-investigation.md. This exception's
+    original text is preserved below for history, but its network-level
+    ad-blocker hypothesis should be treated as ruled out, not just unproven.
+
     Note the shim only covers *one* branch of the gate script: the `else`
     half, where `window.open(adUrl)` fails/returns null. `LLIsBlocked` itself
     - the flag that picks the `if` branch in the first place - is evaluated
@@ -170,7 +195,15 @@ def _install_window_open_shim(context: BrowserContext) -> None:
     `window.open()` is blocked. Must be installed before any page navigates
     (via `context.add_init_script`, not after `new_page()`) so it's present
     before the gate's own scripts run. See WINDOW_OPEN_SHIM_JS and
-    AdNetworkDeadEndError for the full rationale."""
+    AdNetworkDeadEndError for the full rationale.
+
+    NOTE (2026-07-24 live re-check, see AdNetworkDeadEndError's docstring):
+    the current live gate script does not actually gate `xxc.submit()` on
+    `window.open()`'s return value at all - it calls `window.open(...)` and
+    then `xxc.submit()` unconditionally. Kept as defense-in-depth in case an
+    older/other gate template variant (teknoasian.com's script has changed at
+    least twice historically per docs/research/prior-art-and-alternatives.md)
+    does use that pattern - it's harmless either way."""
     context.add_init_script(WINDOW_OPEN_SHIM_JS)
 
 
