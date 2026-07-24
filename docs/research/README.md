@@ -1,7 +1,11 @@
 # Research Summary — Auto Pahe Media Downloader
 
 This folder documents investigation only; no implementation code exists yet. See
-`site-structure.md` (Part 1) and `mega-link-redirect-flow.md` (Part 2) for full detail.
+`site-structure.md` (Part 1) and `mega-link-redirect-flow.md` (Part 2) for full detail. Also see
+`prior-art-and-alternatives.md` (Part 3), `playwright-feasibility.md` (Part 4), and
+`cloudflare-bypass-investigation.md` (Part 5, "is there any way past the terminal Cloudflare
+challenge without a human" — verdict: no, from this sandbox's datacenter IP; ship the
+automated-up-to-the-block + manual-fallback design).
 
 ## Part 1 — pahe.ink page structure: mostly solved
 
