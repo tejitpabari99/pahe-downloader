@@ -18,11 +18,21 @@ the full findings this design follows):
   4. Click ".postnext". This simultaneously fires an unrelated ad-monetization
      popup (intercepted and closed immediately, never navigated) and submits
      a same-page form (`#xxc`) whose response is the terminal step.
-  5. The terminal response is either:
+  5. The terminal response is one of:
        (a) the resolved page/content containing a mega.nz URL - success, or
        (b) a genuine Cloudflare Managed Challenge (403 / `cf-mitigated:
            challenge` / "Just a moment..." title) - the known, reproducible
-           block documented in playwright-feasibility.md.
+           block documented in playwright-feasibility.md, or
+       (c) an ad-network dead end: instead of (a) or (b), the tab is
+           diverted to unrelated content (e.g. a random teknoasian.com blog
+           article) with no mega.nz URL and no Cloudflare markers either.
+           This happens when the ad popup at step 4 is blocked and the
+           site's own script falls back to hijacking the *same* tab instead
+           - see docs/research/cloudflare-bypass-investigation.md and
+           AdNetworkDeadEndError. `_install_window_open_shim()` prevents
+           most instances of this; `_looks_like_ad_dead_end()` catches
+           whatever slips through so it's reported accurately (there is
+           nothing to click through on a page like this, unlike (b)).
 
 Hybrid fallback (the key UX requirement): on (b), do NOT ask the user to
 start over in a separate browser. Instead, carry the already-established
@@ -31,7 +41,9 @@ browser window - positioned at exactly the same point the automated chain
 reached - and poll that window for a mega.nz/mega.co.nz URL to appear once
 the user clears the visible challenge there. Auto-capture it the moment it
 appears, close the browser, return it. No copy/paste, no second tab, no
-re-running the tool.
+re-running the tool. On (c), the headed fallback is skipped entirely (it
+would just be a silent dead end) and AdNetworkDeadEndError is raised
+immediately with an accurate explanation instead.
 
 Safety invariants enforced throughout:
   - Never logs into MEGA.
@@ -86,6 +98,26 @@ class CloudflareChallengeTimeout(GateResolutionError):
     time, or the chain terminated in something other than a mega.nz link)."""
 
 
+class AdNetworkDeadEndError(GateResolutionError):
+    """The `.postnext` click diverted the tab to unrelated ad-network content
+    (e.g. a random teknoasian.com blog article) instead of reaching either the
+    mega.nz chain or a genuine Cloudflare challenge, and there was nothing on
+    the resulting page to interact with.
+
+    This is a known teknoasian.com race condition - see "Why patchright
+    reached a clean comparison and the other two didn't" in
+    docs/research/cloudflare-bypass-investigation.md, which documents the
+    site's own `if (LLIsBlocked) {...} else { window.open(adUrl);
+    xxc.submit(); }` branch and observed cases where a blocked/failed
+    `window.open()` causes the *same tab* to navigate to the ad content
+    instead. `_install_window_open_shim()` prevents most instances of this at
+    the source; this exception covers whatever slips through so the CLI can
+    report it accurately instead of misreporting it as a Cloudflare
+    challenge (there is nothing to "clear" on a page like this, so opening a
+    headed browser window for it would just be a silent dead end - as
+    observed in a live bug report)."""
+
+
 class _BlockedDuringChain(Exception):
     """Internal signal: a Cloudflare challenge was detected while trying to
     drive the click-chain (front door or mid-chain), distinct from the
@@ -96,6 +128,37 @@ class _BlockedDuringChain(Exception):
 class _ChainOutcome:
     mega_url: str | None
     blocked: bool
+
+
+WINDOW_OPEN_SHIM_JS = """
+(() => {
+  const nativeOpen = window.open;
+  window.open = function (...args) {
+    const win = nativeOpen.apply(window, args);
+    if (win) return win;
+    // Popup blocked (common for programmatic window.open() from an
+    // automated click, per docs/research/cloudflare-bypass-investigation.md).
+    // teknoasian.com's own gate script does
+    // `var w = window.open(adUrl); if (!w) location.href = adUrl;`-shaped
+    // fallbacks (see the humanVerify/.postnext chain), which hijacks the
+    // *main tab* to the ad content when window.open() fails, derailing the
+    // chain before it ever reaches the real #xxc form response or a genuine
+    // Cloudflare challenge. Returning a truthy stub window instead makes
+    // that fallback branch believe the popup succeeded, so the main tab is
+    // left alone.
+    return { closed: false, close() {}, focus() {}, blur() {}, postMessage() {} };
+  };
+})();
+"""
+
+
+def _install_window_open_shim(context: BrowserContext) -> None:
+    """Neutralizes the same-tab-hijack fallback some ad scripts use when
+    `window.open()` is blocked. Must be installed before any page navigates
+    (via `context.add_init_script`, not after `new_page()`) so it's present
+    before the gate's own scripts run. See WINDOW_OPEN_SHIM_JS and
+    AdNetworkDeadEndError for the full rationale."""
+    context.add_init_script(WINDOW_OPEN_SHIM_JS)
 
 
 def _install_popup_guard(context: BrowserContext, ignored: list[str]) -> None:
@@ -138,6 +201,26 @@ def _is_cloudflare_challenge(page: Page) -> bool:
         return page.locator("iframe[src*='challenges.cloudflare.com']").count() > 0
     except Exception:
         return False
+
+
+def _looks_like_ad_dead_end(page: Page) -> bool:
+    """True if `page` is neither a genuine Cloudflare challenge nor still
+    showing any of the gate's own click-chain markers - i.e. it looks like
+    the ad-network diversion AdNetworkDeadEndError documents, not a
+    Cloudflare challenge and not mid-chain. There would be nothing for a
+    human to click through on a page like this, so a headed-browser fallback
+    would be pointless."""
+    if _is_cloudflare_challenge(page):
+        return False
+    try:
+        has_gate_markers = (
+            page.locator(".humanVerify").count() > 0
+            or page.locator(".postnext").count() > 0
+            or page.locator("#xxc").count() > 0
+        )
+    except Exception:
+        has_gate_markers = False
+    return not has_gate_markers
 
 
 def _drive_verify_chain(page: Page) -> None:
@@ -217,6 +300,9 @@ def _new_browser_and_context(
         viewport=VIEWPORT,
         storage_state=storage_state,
     )
+    # Must happen before context.new_page()/any navigation - see
+    # _install_window_open_shim's docstring.
+    _install_window_open_shim(context)
     return browser, context
 
 
@@ -233,8 +319,11 @@ def resolve_gate_url(
     docs/planning/cli-ux-notes.md.
 
     Raises GateChainStructureError if the expected page structure never
-    appears (site changed), or CloudflareChallengeTimeout if the headed
-    fallback window timed out without the user clearing the challenge.
+    appears (site changed), CloudflareChallengeTimeout if the headed
+    fallback window timed out without the link resolving, or
+    AdNetworkDeadEndError if the chain was diverted to unrelated ad-network
+    content with nothing to click through (not a Cloudflare challenge - see
+    that exception's docstring).
     """
 
     def status(msg: str) -> None:
@@ -290,16 +379,45 @@ def resolve_gate_url(
                 browser.close()
                 return outcome.mega_url
 
-        # Blocked (or ambiguous - no link found and no explicit block signature
-        # either, e.g. a slow render): fall back to a headed window rather than
-        # giving up, since the whole point of this design is to avoid asking the
-        # user to start over from scratch. Carry the current session (cookies)
-        # and exact URL over so the fallback window opens already positioned at
-        # the same point the automated chain reached.
-        status(
-            "hit a Cloudflare challenge - opening a visible browser window for "
-            "you to clear it (this is expected sometimes; see README)..."
-        )
+        # Not resolved. This is one of two very different situations, and
+        # conflating them was the root cause of a real bug (see
+        # AdNetworkDeadEndError and docs/research/cloudflare-bypass-
+        # investigation.md): a genuine Cloudflare challenge (blocked_early,
+        # or the page currently shows CF's own markers) DOES have something
+        # a human can clear in a headed browser window. An ad-network
+        # diversion - the tab landed on unrelated content with no gate
+        # markers and no Cloudflare markers either - does NOT; opening a
+        # headed window for it is a silent dead end, so fail fast and
+        # honestly instead.
+        if not blocked_early and _looks_like_ad_dead_end(page):
+            dead_end_url = page.url
+            browser.close()
+            raise AdNetworkDeadEndError(
+                f"The click-through chain was diverted to an unrelated page "
+                f"({dead_end_url}) instead of reaching the download link or a "
+                "Cloudflare challenge. This is a known teknoasian.com "
+                "ad-network race condition, not a Cloudflare challenge - "
+                "there is nothing to solve on that page. Please re-run the "
+                "tool (this is usually transient); if it keeps happening, "
+                "see docs/research/cloudflare-bypass-investigation.md."
+            )
+
+        is_cf = blocked_early or _is_cloudflare_challenge(page)
+        if is_cf:
+            status(
+                "hit a Cloudflare challenge - opening a visible browser window "
+                "for you to clear it (this is expected sometimes; see "
+                "README)..."
+            )
+        else:
+            status(
+                "didn't resolve automatically (still on an unfinished gate "
+                "page) - opening a visible browser window for you to finish "
+                "it..."
+            )
+        # Carry the current session (cookies) and exact URL over so the
+        # fallback window opens already positioned at the same point the
+        # automated chain reached.
         current_url = page.url
         storage_state = context.storage_state()
         browser.close()
@@ -318,8 +436,8 @@ def resolve_gate_url(
             ) from exc
 
         status(
-            f"waiting up to {HEADED_FALLBACK_TIMEOUT_SECONDS}s for the challenge "
-            "to be cleared..."
+            f"waiting up to {HEADED_FALLBACK_TIMEOUT_SECONDS}s for "
+            + ("the challenge to be cleared..." if is_cf else "the link to resolve...")
         )
         headed_deadline = time.monotonic() + HEADED_FALLBACK_TIMEOUT_SECONDS
         final_outcome = _poll_for_outcome(headed_page, headed_deadline, poll_interval=1.5)
@@ -330,9 +448,16 @@ def resolve_gate_url(
             status("resolved.")
             return final_outcome.mega_url
 
+        if is_cf:
+            raise CloudflareChallengeTimeout(
+                f"Timed out after {HEADED_FALLBACK_TIMEOUT_SECONDS}s waiting for "
+                "a mega.nz URL to appear in the headed browser window. Either "
+                "the challenge wasn't cleared in time, or the chain led "
+                "somewhere other than mega.nz for this entry."
+            )
         raise CloudflareChallengeTimeout(
             f"Timed out after {HEADED_FALLBACK_TIMEOUT_SECONDS}s waiting for a "
-            "mega.nz URL to appear in the headed browser window. Either the "
-            "challenge wasn't cleared in time, or the chain led somewhere "
-            "other than mega.nz for this entry."
+            "mega.nz URL to appear in the headed browser window. This wasn't a "
+            "Cloudflare challenge - the gate page just never resolved to a "
+            "download link in that window."
         )
