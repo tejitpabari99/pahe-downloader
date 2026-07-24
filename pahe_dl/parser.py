@@ -9,15 +9,31 @@ Approach (see docs/research/site-structure.md for the full research this follows
   1:1 *by position* (there is no id/data attribute linking them) - tab[i] is
   pane[i]. This is how the site's own jQuery binds them client-side, and it's
   the only way to recover "which pane is which resolution/episode label".
-- Two layouts share this same shape, just with the axes swapped:
-    * "batch release": tabs = resolution (480p/720p/1080p), inner groups =
+- Three layouts are handled (see docs/research/site-structure.md for the full
+  research this follows):
+    * "batch release": tabs = resolution (480p/720p/1080p/2160p), inner groups =
       "Per Episode" / "Batch".
     * "ongoing release": tabs = episode number, inner groups = resolution/
       quality variant.
-  Both are handled identically by this parser because it doesn't hardcode
-  which axis means what - it just reports `tab_label` (from tabs-nav) and
-  `group_label` (from the nearest preceding bold/title text inside the pane),
-  and leaves interpretation to the caller/CLI.
+    * "movie release": no tabs at all - there is no `.post-tabs-ver`/
+      `.post-tabs` wrapper, just one or more bare `.box.download` elements
+      directly in the post body, each containing several resolution/quality
+      groups back-to-back (e.g. 480p, 720p x264, 720p x265, 1080p x264, ...
+      all in the same box, `<br>`-separated). Handled by treating the whole
+      page as a single unlabeled "tab" (`tab_label=""`) and reusing the same
+      box-walking logic.
+  All three are handled by the same code because it doesn't hardcode which
+  axis means what - it just reports `tab_label` (from tabs-nav, or "" when
+  there is no tab structure) and `group_label` (from the label text
+  immediately preceding each run of provider buttons inside the box), and
+  leaves interpretation to the caller/CLI.
+- Group/resolution labels are not always wrapped in a `<b>`/`<strong>`/`<span>`
+  tag - on movie pages they're bare text nodes (e.g. `1080p x265 DD+5.1 | 2.31
+  GB` sitting directly in the box, no wrapping tag at all), sometimes with an
+  inline `<a>` (non-button, e.g. a colored "HDR DV" tag or a "MediaInfo" link)
+  in the middle of the label text. So label text is accumulated from *any*
+  non-button, non-`<br>` inline content since the last flush (on `<br>` or
+  right before a button run), not just from a fixed set of tag names.
 - No provider's real destination host (mega.nz or otherwise) ever appears in
   the HTML - every provider button links to the same opaque
   `teknoasian.com/?ht=<token>` gate. The only reliable signal for "this is the
@@ -42,10 +58,6 @@ REQUEST_TIMEOUT = 20  # seconds
 # Matches MG, MG1, MG 1, MG 2, ... case-sensitively (per research: provider
 # abbreviations are case-sensitive visible text, not a stable CSS signal).
 MEGA_PATTERN = re.compile(r"^MG(?:\s*\d+)?$")
-
-# Tags whose text updates the "current group label" while walking a box's
-# children (title span, bold/strong group headers like "Per Episode"/"Batch").
-_LABEL_TAGS = {"b", "strong", "span"}
 
 
 class ParseError(Exception):
@@ -117,26 +129,66 @@ def _extract_box_entries(box: Tag, tab_label: str) -> list[Entry]:
 
     A box carries up to two label "levels": a title, e.g. "480p x264" or
     "1080p x264 6CH" (batch pages), or an episode title like "Episode 1"
-    (ongoing pages) - always the *first* label tag seen in the box - and
-    zero or more subsequent group markers, e.g. "Per Episode"/"Batch" (batch
-    pages) or a fresh quality variant like "720p x264 | 450 MB" (ongoing
-    pages, where each new label tag both replaces the "group" and acts as
-    its own title, since that layout has no separate title/group nesting).
-    Both are tracked so entries stay distinguishable (e.g. the two 720p
-    boxes on a batch page - x264 vs x265 - would otherwise both just say
-    "Per Episode").
+    (ongoing pages) - always the *first* label seen in the box - and zero or
+    more subsequent group markers, e.g. "Per Episode"/"Batch" (batch pages),
+    a fresh quality variant like "720p x264 | 450 MB" (ongoing pages), or a
+    fresh resolution+quality line like "1080p x265 DD+5.1 | 2.31 GB" (movie
+    pages, which pack every resolution into one box with no separate
+    title/group nesting - each new label both replaces the "group" and, if
+    it's the first one, acts as the box's title). Both are tracked so
+    entries stay distinguishable (e.g. the two 720p boxes on a batch page -
+    x264 vs x265 - would otherwise both just say "Per Episode").
+
+    Label text is not confined to a fixed set of tag names: on movie pages a
+    label is a bare text node, sometimes with an inline non-button `<a>`
+    (e.g. a colored "HDR DV" marker or a "MediaInfo" link) spliced into the
+    middle of it. So any non-button, non-`<br>` inline content is accumulated
+    into a pending-label buffer and flushed (replacing "current group", and
+    "title" if not yet set) at each `<br>` and again just before any button
+    run, in case a label isn't `<br>`-terminated.
+
+    Whether the box's first label is a genuine standalone "title" that should
+    go on prefixing every later group (batch/ongoing pages: e.g. "480p x264"
+    heading zero buttons of its own, followed by "Per Episode"/"Batch"
+    sub-groups that each get their own buttons) or is itself just the first
+    of several self-contained, unrelated groups (movie pages: e.g. "480p
+    x264 | 450 MB" already has its own button row - there is no shared
+    heading at all, so it must not bleed into "720p x264 | 950 MB" later in
+    the same box) can't be told upfront. It's inferred after the fact: if the
+    first label ever directly gets its own buttons (`current_group ==
+    box_title` at emission time), it wasn't a pure header, so it stops being
+    used as a prefix for whatever unrelated groups follow it.
     """
     inner = box.find("div", class_="box-inner-block") or box
     entries: list[Entry] = []
     box_title: str | None = None
     current_group: str | None = None
+    title_is_pure_header = True
+    pending_parts: list[str] = []
+
+    def flush_pending() -> None:
+        nonlocal box_title, current_group
+        text = " ".join(part for part in pending_parts if part)
+        text = re.sub(r"\s+", " ", text).strip()
+        pending_parts.clear()
+        if text:
+            if box_title is None:
+                box_title = text
+            current_group = text
 
     for child in inner.children:
         name = getattr(child, "name", None)
         if name == "a":
             classes = child.get("class") or []
             if not any(c.startswith("shortc-button") for c in classes):
+                # A non-button anchor (e.g. a colored "HDR DV" marker, a
+                # "MediaInfo" link) is part of the surrounding label text,
+                # not spacing - fold its text into the pending label.
+                text = child.get_text(strip=True)
+                if text:
+                    pending_parts.append(text)
                 continue
+            flush_pending()
             provider_text = child.get_text(strip=True)
             href = child.get("href", "").strip()
             if not provider_text or not href:
@@ -145,8 +197,15 @@ def _extract_box_entries(box: Tag, tab_label: str) -> list[Entry]:
                 detail_label = "(unlabeled)"
             elif box_title is None or current_group == box_title:
                 detail_label = current_group
-            else:
+                if box_title is not None:
+                    # The "title" just got its own buttons directly, so it
+                    # was never a pure header - don't let it keep prefixing
+                    # whatever unrelated groups come after it in this box.
+                    title_is_pure_header = False
+            elif title_is_pure_header:
                 detail_label = f"{box_title} - {current_group}"
+            else:
+                detail_label = current_group
             entries.append(
                 Entry(
                     tab_label=tab_label,
@@ -155,13 +214,20 @@ def _extract_box_entries(box: Tag, tab_label: str) -> list[Entry]:
                     gate_url=href,
                 )
             )
-        elif name in _LABEL_TAGS:
+        elif name == "br":
+            flush_pending()
+        elif name is None:
+            # NavigableString: bare label text (movie pages put resolution/
+            # quality lines directly here, with no wrapping tag at all).
+            text = str(child).strip()
+            if text:
+                pending_parts.append(text)
+        else:
+            # <b>/<strong>/<span>/<em>/... label-bearing tags, and <i> icon
+            # tags (empty text, contribute nothing).
             text = child.get_text(strip=True)
             if text:
-                if box_title is None:
-                    box_title = text
-                current_group = text
-        # <br>, "&nbsp;" NavigableStrings, <i> icon tags: ignored (pure spacing).
+                pending_parts.append(text)
 
     return entries
 
@@ -169,20 +235,42 @@ def _extract_box_entries(box: Tag, tab_label: str) -> list[Entry]:
 def parse_page(url: str, html: str | None = None) -> ParsedPage:
     """Fetch (unless `html` is supplied, e.g. for tests) and parse a pahe.ink
     page into a flat list of provider Entry objects across all resolution/
-    episode tabs. Raises ParseError if no recognizable download-tabs
-    structure is found at all; returns a ParsedPage with an empty entry list
-    (not an error) if tabs are found but simply carry no MEGA buttons.
+    episode tabs (or, on a movie page with no tab structure at all, across
+    its flat `.box.download` sections - see module docstring). Raises
+    ParseError if no recognizable download structure is found at all;
+    returns a ParsedPage with an empty entry list (not an error) if a
+    structure is found but simply carries no MEGA buttons.
     """
     if html is None:
         html = fetch_html(url)
 
     soup = BeautifulSoup(html, "html.parser")
     containers = soup.select("div.post-tabs-ver, div.post-tabs")
+
     if not containers:
-        raise ParseError(
-            "No '.post-tabs-ver' / '.post-tabs' download section found on this page - "
-            "is this really a pahe.ink release page?"
-        )
+        # Movie pages (e.g. a single-quality-tier release with no episodes)
+        # carry no `.post-tabs-ver`/`.post-tabs` wrapper at all - just one or
+        # more bare `.box.download` elements directly in the post body, each
+        # bundling every resolution/quality tier back-to-back. Scope the
+        # search to the main post-content wrapper (`.entry`) when present, to
+        # avoid picking up an unrelated same-shaped widget elsewhere on the
+        # page; fall back to the whole document if `.entry` isn't found.
+        scope = soup.find("div", class_="entry") or soup
+        boxes = [
+            b
+            for b in scope.find_all("div")
+            if {"box", "download"} <= set(b.get("class") or [])
+        ]
+        if not boxes:
+            raise ParseError(
+                "No '.post-tabs-ver' / '.post-tabs' download section, and no "
+                "flat '.box.download' section either - is this really a "
+                "pahe.ink release page?"
+            )
+        entries = []
+        for box in boxes:
+            entries.extend(_extract_box_entries(box, tab_label=""))
+        return ParsedPage(url=url, entries=entries)
 
     entries: list[Entry] = []
     for container in containers:
