@@ -11,6 +11,7 @@ Status: verified against live pages, fetched read-only via `curl` (browser User-
 | `https://pahe.ink/category/ongoing/` | Find an example of a weekly/episodic release | 200 |
 | `https://pahe.ink/parish-season-1/` | Example of an "ongoing" episode-by-episode release | 200 |
 | `https://pahe.ink/robots.txt` | Crawl policy check | 200 |
+| `https://pahe.ink/obsession-2025-bluray-480p-720p-1080p-2160p/` | Bug report follow-up — a **movie** release (resolves the "movie pages" open question below) | 200 |
 
 `robots.txt` only disallows `/wp-admin/` (and explicitly allows `admin-ajax.php`). No
 `Crawl-delay`. Content pages are not disallowed. The site is a plain WordPress install
@@ -99,6 +100,95 @@ Here the tab axis is **episode**, and *within* each episode tab, resolution/qual
 variants are the inner grouping — the inverse nesting of Pattern A. Also note the host set
 differs: `SD` appears here instead of `VF`, and `1F` is absent — the provider set is not
 fixed either.
+
+### Pattern C — "movie release" (no tabs at all)
+
+Example: `obsession-2025-bluray-480p-720p-1080p-2160p` (a bug report — the parser raised
+`ParseError: No '.post-tabs-ver' / '.post-tabs' download section found` against this URL,
+prompting this investigation). This resolves the "movie pages" open question flagged at the
+end of Part 1: **confirmed movie pages are a third, structurally distinct layout**, not a
+degenerate case of Pattern A/B.
+
+```
+<div class="entry">
+  ...
+  <p>
+    <div class="box download"><div class="box-inner-block">
+      <i class="fa tie-shortcode-boxicon"></i>
+      480p x264 | 450 MB<br/>
+      <a href="https://teknoasian.com/?ht=...." class="shortc-button small orange">1F</a>
+      <a ... class="shortc-button small purple">GD</a>
+      <a ... class="shortc-button small red">MG</a>
+      <a ... class="shortc-button small green">VF</a>
+      <a ... class="shortc-button small blue">TB</a>
+      <br/><br/>
+      720p x264 | 950 MB<br/>
+      ... 1F / GD / MG / VF / TB again ...
+      <br/><br/>
+      720p x265 10Bit | 635 MB<br/>
+      ... 1F / GD / MG / VF / TB ...
+      <br/><br/>
+      1080p x264 DD+5.1 | 3.09 GB<br/>
+      ... 1F / GD / MG / VF / TB ...
+      <br/><br/>
+      1080p x265 10Bit DD+5.1 | 2.50 GB<br/>
+      ... 1F / GD / MG / VF / TB ...
+    </div></div>
+  </p>
+  <p>
+    <div class="box download"><div class="box-inner-block">
+      <i class="fa tie-shortcode-boxicon"></i>
+      <em><strong>Source:</strong>2160p.UHD.BluRay.Remux.HDR.DV.HEVC.TrueHD.Atmos.7.1-CiNEPHiLES</em>
+      <br/><br/>
+      1080p x265 <a style="color:#d4af37;">HDR DV</a> DD+5.1 | 2.31 GB<br/>
+      ... 1F / GD / MG / VF / TB ...
+      <br/><br/>
+      2160p x265 <a style="color:#d4af37;">HDR DV</a> DD+5.1 Atmos | 7.10 GB |
+      <a href="https://pastebin.com/raw/..." style="color:#00e803;">MediaInfo</a><br/>
+      ... 1F / GD / MG / VF / TB ...
+    </div></div>
+  </p>
+  ...
+</div>
+```
+
+Key findings, all confirmed against the live page:
+
+- **There is no `.post-tabs-ver`/`.post-tabs` wrapper at all** — no `ul.tabs-nav`, no
+  `.pane`. The `.box.download` elements sit directly in the post body (as siblings inside
+  plain `<p>` tags under `.entry`), not nested inside any tab/pane structure. This is what
+  caused the reported crash: the parser treated "no tabs container found" as "not a valid
+  pahe.ink page" and raised unconditionally, when really it just meant "this page has no
+  episode/resolution tab axis at all."
+- **A single box bundles every resolution/quality tier back-to-back**, `<br>`-separated,
+  rather than one box (or tab) per resolution. The first box above alone carries 480p,
+  720p x264, 720p x265, 1080p x264, and 1080p x265 — five tiers in one box, zero tabs.
+- **Resolution/quality labels are bare text nodes**, not wrapped in any `<b>`/`<strong>`/
+  `<span>` tag the way Patterns A and B always wrap theirs (e.g. `480p x264 | 450 MB` sits
+  directly in `box-inner-block` with no enclosing tag at all). A parser that only watches
+  for specific label *tag names* (as the original implementation did) sees no label at all
+  here and would misattribute every button to an "(unlabeled)" bucket even after the
+  tabs/panes issue above is fixed.
+- A label can also have a **non-button `<a>` spliced into the middle of it** — e.g. a
+  `<a style="color:#d4af37;">HDR DV</a>` marker, or a `<a>MediaInfo</a>` link to an external
+  pastebin — that carries meaningful label text (not spacing) but must not be confused with
+  a provider button.
+- The **2160p resolution tier itself needed no special handling** once the above two
+  structural issues were fixed — there is no resolution allow-list anywhere in the parser;
+  any resolution string flows through as opaque label text. The `2160p` in the bug report
+  URL was a red herring as far as root cause goes — the real breakage was 100% structural
+  (missing tabs, untagged labels), not a "we've never seen 2160p" issue.
+- The second box is a genuine two-level structure: an overarching `Source: ...` line
+  (release-group/media-info metadata) followed by two *actual* resolution groups (1080p
+  HDR remux, 2160p HDR remux) that each get their own button row. This is structurally the
+  *same shape* as Pattern A's "title, then N labeled sub-groups" nesting — just with a
+  metadata string as the title instead of a resolution. The parser's box-title logic
+  originally assumed the first label in a box is always this kind of pure, buttonless
+  header; Pattern C's *first* box violates that assumption (its first label, `480p x264 |
+  450 MB`, already owns its own button row) and needed a small refinement: a box's first
+  label only keeps acting as a persistent title/prefix for later groups if it never directly
+  owned a button row itself — otherwise it's treated as just the first of several
+  self-contained, unrelated groups (see `_extract_box_entries` in `pahe_dl/parser.py`).
 
 ## How resolutions/tabs map to content (a real gotcha)
 
@@ -193,5 +283,29 @@ exhaustive.
   (whole season), or something else — could not confirm without following the MEGA link
   itself (out of scope / not requested this session, and doing so would require Part 2's
   redirect chain anyway).
-- Whether movie pages (single quality, no episodes/batches) use a third, simpler shape.
-  Recommend sampling one before implementation.
+
+## Update (movie-page bug follow-up)
+
+The "whether movie pages use a third, simpler shape" open question above was **not**
+correct as speculated — movie pages are a third layout, but not a simpler one. See
+"Pattern C — movie release" above for the confirmed structure (no tabs at all, bare-text
+labels, and a resolution/quality axis packed multiple-per-box instead of one-per-tab). The
+parser (`pahe_dl/parser.py`) was fixed accordingly:
+
+1. `parse_page` no longer raises when no `.post-tabs-ver`/`.post-tabs` container exists —
+   it falls back to scanning for bare `.box.download` elements (scoped to `div.entry`, the
+   main post-content wrapper, to avoid matching an unrelated same-shaped widget elsewhere
+   on the page) and parses them as a single untitled "tab" (`tab_label=""`).
+2. `_extract_box_entries`'s label-tracking no longer keys off a fixed set of tag names
+   (`b`/`strong`/`span`) — it accumulates *any* non-button, non-`<br>` inline content
+   (bare text, non-button `<a>`, any other inline tag) since the last flush point, so
+   untagged bare-text labels (Pattern C) are captured the same as tagged ones (Patterns A
+   and B).
+3. A box's first label is only treated as a persistent "title" prefixed onto later groups
+   if it never directly owned a button row of its own — otherwise (Pattern C's common case)
+   each label is treated as a self-contained, independent group.
+
+Regression-tested against both previously-working pages (`game-of-thrones-season-8-*` and
+`parish-season-1`) with a diff against the pre-fix parser: identical entry counts and
+`gate_url`s in both cases, with only cosmetic label-text enrichment (e.g. size info that
+used to get silently dropped is now included) — no functional regression.
