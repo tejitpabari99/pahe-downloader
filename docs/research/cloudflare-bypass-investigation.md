@@ -327,6 +327,71 @@ is still unsolved by any tested technique) - it fixes a separate, earlier failur
 strike before the terminal challenge is even reached, and that produced a misleading error message
 for a real user.
 
+## Addendum: revisiting whether a network-level ad blocker could still defeat the shim fix (2026-07-24)
+
+Follow-up to the addendum above, triggered by a second live report: the user re-ran the tool after
+the `WINDOW_OPEN_SHIM_JS` fix landed and it still didn't resolve automatically, and asked whether
+their own ad blocker could be the cause.
+
+**Short answer: plausible, and it's a real gap the shim doesn't cover - not overlap with the bug
+already fixed.** Re-reading the reverse-engineered branch quoted in both the section-2 writeup and
+the addendum above, closely:
+
+```
+if (LLIsBlocked) { ... show "Ad blocker detected, please wait Ns" ... }
+else { window.open(adUrl); xxc.submit(); }
+```
+
+Two things follow from this shape that weren't spelled out before:
+
+1. **`xxc.submit()` - the call that actually reaches the real mega.nz chain - lives inside the
+   `else` branch, gated on `LLIsBlocked` being false.** `WINDOW_OPEN_SHIM_JS` only changes what
+   `window.open(adUrl)` *returns* inside that same `else` branch (truthy stub instead of null,
+   defeating a `if (!w) location.href = adUrl`-shaped fallback pattern *elsewhere* in the gate's
+   click chain per the first addendum). It does nothing to influence `LLIsBlocked` itself, which is
+   decided by a separate, not-yet-recovered ad-blocker-detection check *before* either branch runs.
+   If that check evaluates true, the `if` branch runs instead - a branch the shim was never designed
+   to touch - and whatever it does next (the recovered fragment only shows a "please wait" message,
+   not its eventual resolution) is exactly the kind of thing that could plausibly still divert the
+   tab, independent of the window.open() fix entirely.
+2. **A DNS/router/VPN-level ad blocker (as opposed to a browser-extension one) is a plausible way to
+   flip `LLIsBlocked` to true** - most ad-blocker-detection techniques work by trying to load a
+   known ad-related resource (a bait script/image/element) and checking whether it failed, which is
+   exactly what a network-level blocker (Pi-hole, AdGuard Home, a VPN's built-in filter, some
+   corporate/router-level policies) would cause regardless of which browser or profile makes the
+   request - unlike a browser popup blocker, which the shim already handles by design.
+   `resolver.py`'s browser context is confirmed vanilla and extension-free (`grep -n "launch\b"
+   pahe_dl/resolver.py` shows only `playwright.chromium.launch(headless=...)` - no
+   `launch_persistent_context`, no `user_data_dir`, no `channel=`, i.e. a fresh bundled Chromium
+   with the user's real profile/extensions never in the picture), so a **browser-extension**
+   adblocker on the user's everyday browser specifically is *not* a plausible cause here - but a
+   **network-level** one still is, since it would affect this tool's launched browser too, on
+   whatever network it runs from.
+
+What this addendum does *not* do is claim certainty: the exact `LLIsBlocked` detection logic and
+what the `if` branch does after its "please wait" message were never fully recovered (nodriver's
+and camoufox's environments tripped *a* condition adjacent to this branch per section 2, but which
+one, and via which detection mechanism, was never pinned down precisely enough to write a targeted
+JS counter-patch the way `WINDOW_OPEN_SHIM_JS` could for the `!w` case). Writing speculative code
+against an unrecovered detection function isn't a sound fix. Instead, the practical mitigation
+shipped alongside this addendum is a way to route around the whole problem: `--manual` (see
+`pahe_dl/cli.py`) skips the automated browser for the resolve step entirely and just prints the
+gate URL, and the automated flow itself now also prints that same link as a fallback before it
+opens (or fails to open) a headed browser window, for both the Cloudflare-challenge and
+ad-network-dead-end cases - see `manual_fallback_message()` in `resolver.py`. A user who suspects
+their network is the cause (or who's running the tool somewhere with no display for a headed
+browser at all, like a headless VM) can just clear the gate by hand from there, without depending on
+this tool correctly out-guessing every branch of a script that was only ever partially recovered.
+
+It's also worth noting, separately, that "the user hasn't picked up the shim fix yet" remains a live
+possibility for the specific second report that triggered this addendum - the report described the
+resulting browser window as "just opens the same tekno... link," which is consistent with either a
+genuine post-fix Cloudflare-challenge headed-fallback window (same domain, so it can look
+unremarkable to someone not looking for Cloudflare-specific markers) or a pre-fix
+`AdNetworkDeadEndError`-shaped dead end (also same domain). Both explanations remain on the table;
+this addendum's `LLIsBlocked`-branch finding stands regardless of which one actually happened, since
+it's a genuine gap either way.
+
 ## Session artifacts
 
 Three throwaway virtual environments (`.venv-cf-test` with patchright, `.venv-nodriver`,

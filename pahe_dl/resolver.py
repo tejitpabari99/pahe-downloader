@@ -115,7 +115,20 @@ class AdNetworkDeadEndError(GateResolutionError):
     report it accurately instead of misreporting it as a Cloudflare
     challenge (there is nothing to "clear" on a page like this, so opening a
     headed browser window for it would just be a silent dead end - as
-    observed in a live bug report)."""
+    observed in a live bug report).
+
+    Note the shim only covers *one* branch of the gate script: the `else`
+    half, where `window.open(adUrl)` fails/returns null. `LLIsBlocked` itself
+    - the flag that picks the `if` branch in the first place - is evaluated
+    by a separate ad-blocker-detection check the shim does not touch, and the
+    real `xxc.submit()` (the call that reaches the actual mega.nz chain) only
+    happens inside that same `else` branch. So a *network-level* ad/DNS
+    blocker (as opposed to a browser-extension blocker, which this tool's
+    vanilla, extension-free Playwright context never has installed - see
+    docs/research/cloudflare-bypass-investigation.md's addendum on this) that
+    causes `LLIsBlocked` to evaluate true is a plausible, distinct trigger for
+    this same dead end that the shim cannot address at all. See --manual in
+    the CLI for a way to route around this entirely."""
 
 
 class _BlockedDuringChain(Exception):
@@ -175,6 +188,21 @@ def _install_popup_guard(context: BrowserContext, ignored: list[str]) -> None:
             pass
 
     context.on("page", on_popup)
+
+
+def manual_fallback_message(gate_url: str) -> str:
+    """Shared "do it yourself" message for the automated flow's fallback
+    prints (see resolve_gate_url()'s dead-end/Cloudflare branches below) and
+    for the CLI's --manual mode (pahe_dl/cli.py), so both surfaces say the
+    same thing. `gate_url` should be the original `?ht=...` URL, not a
+    mid-chain/session-carrying URL - it's meant to be opened fresh in a
+    plain, unrelated browser (possibly on a different machine entirely, e.g.
+    this tool running headless on a VM and the user finishing verification on
+    their own desktop)."""
+    return (
+        "Open this link in your own browser to complete verification and "
+        f"get the MEGA link:\n{gate_url}"
+    )
 
 
 def _find_mega_url(*texts: str) -> str | None:
@@ -392,14 +420,20 @@ def resolve_gate_url(
         if not blocked_early and _looks_like_ad_dead_end(page):
             dead_end_url = page.url
             browser.close()
+            # Never leave the user with just an error and no way forward -
+            # see manual_fallback_message()'s docstring and --manual in
+            # cli.py. Printed via on_status (reaches the console immediately,
+            # regardless of exactly how the caller chooses to report the
+            # exception below).
+            status(manual_fallback_message(gate_url))
             raise AdNetworkDeadEndError(
                 f"The click-through chain was diverted to an unrelated page "
                 f"({dead_end_url}) instead of reaching the download link or a "
                 "Cloudflare challenge. This is a known teknoasian.com "
                 "ad-network race condition, not a Cloudflare challenge - "
                 "there is nothing to solve on that page. Please re-run the "
-                "tool (this is usually transient); if it keeps happening, "
-                "see docs/research/cloudflare-bypass-investigation.md."
+                "tool (this is usually transient), try --manual, or see "
+                "docs/research/cloudflare-bypass-investigation.md."
             )
 
         is_cf = blocked_early or _is_cloudflare_challenge(page)
@@ -415,6 +449,11 @@ def resolve_gate_url(
                 "page) - opening a visible browser window for you to finish "
                 "it..."
             )
+        # Print the plain fallback link *before* attempting the headed
+        # window, not just on eventual timeout - this is the only fallback
+        # a headless machine (no display at all) has, since the headed
+        # launch below will itself fail there. See manual_fallback_message().
+        status(manual_fallback_message(gate_url))
         # Carry the current session (cookies) and exact URL over so the
         # fallback window opens already positioned at the same point the
         # automated chain reached.
