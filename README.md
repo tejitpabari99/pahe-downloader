@@ -81,6 +81,15 @@ the same token tends to make Cloudflare's response worse, not better. If you wan
 again, re-run the tool (this may or may not get a fresh token, since pahe.ink pages are
 cached) or pick a different resolution/entry.
 
+**Not every dead end is a Cloudflare challenge.** teknoasian.com's ad-monetization step
+occasionally diverts the browser tab to unrelated ad content (e.g. a random blog article on
+the same domain) instead of either the download link or a real Cloudflare challenge - see
+`docs/research/cloudflare-bypass-investigation.md`. There's nothing to click through on a
+page like that, so the tool detects this case specifically and fails fast with a clear
+"ad-network dead end" error instead of opening a pointless visible browser window and telling
+you it's a Cloudflare challenge. If you see that error, just re-run the tool - it's normally
+transient.
+
 ## Project layout
 
 - `pahe_dl/parser.py` - fetches and parses a pahe.ink page into resolutions/episodes -> MEGA

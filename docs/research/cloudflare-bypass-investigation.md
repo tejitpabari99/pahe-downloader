@@ -284,6 +284,49 @@ finish: `<gate_url>`"* rather than language implying the tool itself is fundamen
 If real-world reports come back showing residential users hit the same wall as this sandbox,
 that would be the trigger to revisit the paid-CAPTCHA-service option as an opt-in flag.
 
+## Addendum: live bug report confirms the mid-chain diversion also hits plain Playwright (2026-07-24)
+
+A real user run against `resolver.py` (plain Playwright, headless, no anti-detect library)
+reproduced exactly the "mid-chain diversion to unrelated ad content" failure mode that section 2
+above only observed with nodriver and camoufox - it landed on
+`https://teknoasian.com/unlocking-the-future-of-computing-the-power-of-qualcomm-core-oryon/`
+after clicking `.postnext`, i.e. a random `teknoasian.com` blog article, not the `#xxc` form's
+same-page response and not a Cloudflare challenge either. This means the diversion isn't
+exclusive to nodriver/camoufox's environment quirks as section 2 implied - it's evidently a
+race condition in the gate's own script (the `if (LLIsBlocked) {...} else { window.open(adUrl);
+xxc.submit(); }` branch quoted there), most plausibly triggered when the `window.open(adUrl)`
+popup call is blocked/fails and the site falls back to hijacking the main tab, that can also
+happen under plain Playwright, just less often than under nodriver/camoufox.
+
+Two bugs compounded to make this a dead end for the user, both fixed in `resolver.py`:
+
+1. **No defense against the diversion itself.** The `.postnext` click handler only waited for
+   *any* `document`-resource-type response in the context, so a same-tab navigation to the ad
+   article satisfied it exactly as well as the real form response would have. Fix: an init
+   script (`WINDOW_OPEN_SHIM_JS` / `_install_window_open_shim()`) installed on every context
+   before any navigation, wrapping `window.open()` so a blocked/failed popup returns a truthy
+   stub window instead of `null` - this defeats the `if (!w) location.href = adUrl`-shaped
+   fallback pattern at its source, so the main tab is never hijacked in the first place.
+2. **Misreporting the resulting dead end as a Cloudflare challenge.** Regardless of *why* the
+   headless poll failed to find a `mega.nz` URL - a real Cloudflare challenge, or this ad
+   diversion, or anything else - `resolve_gate_url()` unconditionally showed "hit a Cloudflare
+   challenge" and opened a headed fallback browser window positioned at whatever dead-end page
+   it had reached. For the ad-diversion case specifically, that headed window has nothing on it
+   to click through - `_is_cloudflare_challenge()` itself was already reasonably precise (title
+   check + `challenges.cloudflare.com` iframe check), but its result was never actually consulted
+   before choosing the message/exception. Fix: `_looks_like_ad_dead_end()` checks whether the
+   page is a genuine Cloudflare challenge or still shows any gate click-chain markers
+   (`.humanVerify`, `.postnext`, `#xxc`); if neither, `resolve_gate_url()` raises a new
+   `AdNetworkDeadEndError` immediately with an accurate message, skipping the pointless headed
+   fallback entirely. When a headed fallback *is* warranted, its status messages and the final
+   timeout exception now also say "didn't resolve automatically" rather than "Cloudflare
+   challenge" when that's what's actually true.
+
+This doesn't change the headline verdict above (the terminal Cloudflare Managed Challenge itself
+is still unsolved by any tested technique) - it fixes a separate, earlier failure mode that could
+strike before the terminal challenge is even reached, and that produced a misleading error message
+for a real user.
+
 ## Session artifacts
 
 Three throwaway virtual environments (`.venv-cf-test` with patchright, `.venv-nodriver`,
