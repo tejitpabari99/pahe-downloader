@@ -56,6 +56,33 @@ https://mega.nz/folder/AbCdEfGh#SomeRealKeyGoesHere
 
 Use arrow keys + Enter, or type a number (1-9), to pick an entry.
 
+## Options
+
+### `--manual`
+
+```bash
+python -m pahe_dl --manual https://pahe.ink/some-release-page/
+```
+
+Skips the automated Playwright browser entirely for the resolve step. `pahe.ink` itself is
+always parsed via plain HTTP (no browser needed for that part - see `pahe_dl/parser.py`), so
+the tool can still discover entries and let you pick one; it just prints the
+`teknoasian.com/?ht=...` gate URL for your chosen entry instead of trying to click through it,
+e.g.:
+
+```
+Selected: 720p x264 - Per Episode
+Open this link in your own browser to complete verification and get the MEGA link:
+https://teknoasian.com/?ht=some-token-here
+```
+
+Use this when:
+
+- You're running the tool on a machine with no display at all (e.g. a remote VM/server) - a
+  headed browser window (see below) simply cannot open there.
+- The automated browser keeps hitting ad-network dead ends or Cloudflare challenges and you'd
+  rather just open the link yourself in your own everyday browser, on whatever machine you like.
+
 ## The Cloudflare limitation (read this)
 
 The final step of the teknoasian.com gate chain is sometimes protected by a genuine
@@ -75,6 +102,11 @@ The tool handles this as gracefully as possible:
   copy-pasting, no second browser tab, no re-running the tool.
 - If nothing resolves within a few minutes, the tool times out with a clear error message
   rather than hanging forever.
+- **Either way, before it opens (or gives up on) a browser window, the tool also prints the
+  plain gate link to your terminal** ("Open this link in your own browser to complete
+  verification..."), so you're never stuck with just an error and no way forward - you can
+  always paste that link into your own browser by hand, on any machine, exactly like
+  `--manual` mode (above) does from the start.
 
 The tool never retries the same link automatically if it fails - per the research, retrying
 the same token tends to make Cloudflare's response worse, not better. If you want to try
@@ -88,7 +120,12 @@ the same domain) instead of either the download link or a real Cloudflare challe
 page like that, so the tool detects this case specifically and fails fast with a clear
 "ad-network dead end" error instead of opening a pointless visible browser window and telling
 you it's a Cloudflare challenge. If you see that error, just re-run the tool - it's normally
-transient.
+transient - or try `--manual` instead. Note it can also be triggered by a network/DNS-level ad
+blocker (Pi-hole, AdGuard Home, a VPN's built-in blocker, etc. - not a browser extension; the
+automated browser this tool launches is a fresh, extension-free session, so a browser-extension
+adblocker on your everyday browser is not the cause) blocking requests the gate script's own
+ad-blocker-detection logic checks for. If you suspect that, `--manual` sidesteps the whole
+automated chain and lets you clear the gate in your own browser instead.
 
 ## Project layout
 

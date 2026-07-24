@@ -16,6 +16,7 @@ from pahe_dl.picker import NoSelectionError, pick_entry
 from pahe_dl.resolver import (
     CloudflareChallengeTimeout,
     GateResolutionError,
+    manual_fallback_message,
     resolve_gate_url,
 )
 
@@ -44,6 +45,20 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "url",
         nargs="?",
         help="A pahe.ink release page URL (prompted for if omitted).",
+    )
+    parser.add_argument(
+        "--manual",
+        action="store_true",
+        help=(
+            "Skip the automated browser entirely and just print the gate URL "
+            "for you to open yourself. pahe.ink itself is parsed via plain "
+            "HTTP either way (no browser needed for that part) - this only "
+            "skips the Playwright-driven click-through/Cloudflare handling "
+            "for the resolve step. Use this when running on a headless "
+            "machine (no display for a browser window at all), or if the "
+            "automated browser keeps hitting ad-network dead ends or "
+            "Cloudflare challenges and you'd rather clear the gate yourself."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -75,6 +90,14 @@ def main(argv: list[str] | None = None) -> None:
     except NoSelectionError:
         print("No entry selected, exiting.", file=sys.stderr)
         sys.exit(1)
+
+    if args.manual:
+        # No Playwright involved at all here - entry.gate_url already came
+        # from the plain-HTTP static parse in parser.py, so there's nothing
+        # to launch a browser for on this machine. See --manual's help text.
+        print(f"Selected: {entry.label}")
+        print(manual_fallback_message(entry.gate_url))
+        return
 
     print(f"Resolving: {entry.label} ...")
 
